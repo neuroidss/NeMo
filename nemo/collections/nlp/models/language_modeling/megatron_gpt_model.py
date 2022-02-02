@@ -178,6 +178,8 @@ class MegatronGPTModel(NLPModel):
             Our dataloaders produce a micro-batch and then we fetch
             a number of microbatches depending on the global batch size and model parallel size
             from the dataloader to produce a list of microbatches.
+            Batch should be a list of microbatches and those microbatches should on CPU.
+            Microbatches are then moved to GPU during the pipeline.
             The list of microbatches is then piped through the pipeline using Apex fwd/bwd functions.
         """
 
@@ -350,6 +352,7 @@ class MegatronGPTModel(NLPModel):
 
     def get_forward_output_and_loss_func(self):
         def fwd_output_and_loss_func(batch, model):
+            batch = [x.cuda() for x in batch]
             tokens, labels, loss_mask, attention_mask, position_ids = batch
             attention_mask = attention_mask[0:1]
             output_tensor = model(tokens, position_ids, attention_mask, labels)
@@ -452,7 +455,8 @@ class MegatronGPTModel(NLPModel):
         datatype = torch.int64
 
         data = micro_batch
-        data_b = tensor_parallel.broadcast_data(keys, data, datatype)
+        # data_b = tensor_parallel.broadcast_data(keys, data, datatype)
+        data_b = data
 
         # Unpack.
         tokens_ = data_b['text'].long()
@@ -1012,3 +1016,11 @@ class MegatronGPTModel(NLPModel):
             f'Padded vocab_size: {after}, original vocab_size: {orig_vocab_size}, dummy tokens: {after - orig_vocab_size}.'
         )
         return after
+
+    def transfer_batch_to_device(self, batch: Any, device: torch.device, dataloader_idx: int) -> Any:
+        """ PTL hook: https://pytorch-lightning.readthedocs.io/en/latest/common/lightning_module.html#transfer-batch-to-device
+            When using pipeline parallelism, we need the global batch to remain on the CPU,
+            since the memory overhead will be too high when using a large number of microbatches.
+            Microbatches are transferred from CPU to GPU inside the pipeline. 
+        """
+        return batch
