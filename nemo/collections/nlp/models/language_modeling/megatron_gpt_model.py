@@ -23,7 +23,7 @@ from apex.transformer.pipeline_parallel.schedules.fwd_bwd_no_pipelining import f
 from apex.transformer.pipeline_parallel.schedules.fwd_bwd_pipelining_without_interleaving import (
     forward_backward_pipelining_without_interleaving,
 )
-from apex.transformer.pipeline_parallel.utils import get_num_microbatches
+from apex.transformer.pipeline_parallel.utils import get_num_microbatches, _reconfigure_microbatch_calculator
 from omegaconf.dictconfig import DictConfig
 from omegaconf.omegaconf import open_dict
 from pytorch_lightning.plugins.precision.native_amp import NativeMixedPrecisionPlugin
@@ -52,7 +52,7 @@ from nemo.collections.nlp.parts.nlp_overrides import GradScaler
 from nemo.core.optim import MainParamsOptimizerWrapper, prepare_lr_scheduler
 from nemo.collections.nlp.parts.nlp_overrides import NLPDataConnector
 from nemo.collections.nlp.parts.utils_funcs import get_last_rank, inject_model_parallel_rank
-from nemo.utils import AppState, logging
+from nemo.utils import AppState, app_state, logging
 
 
 class MegatronGPTModel(NLPModel):
@@ -177,6 +177,8 @@ class MegatronGPTModel(NLPModel):
             Our dataloaders produce a micro-batch and then we fetch
             a number of microbatches depending on the global batch size and model parallel size
             from the dataloader to produce a list of microbatches.
+            Batch should be a list of microbatches and those microbatches should on CPU.
+            Microbatches are then moved to GPU during the pipeline.
             The list of microbatches is then piped through the pipeline using Apex fwd/bwd functions.
         """
 
@@ -349,6 +351,7 @@ class MegatronGPTModel(NLPModel):
 
     def get_forward_output_and_loss_func(self):
         def fwd_output_and_loss_func(batch, model):
+            batch = [x.cuda() for x in batch]
             tokens, labels, loss_mask, attention_mask, position_ids = batch
             attention_mask = attention_mask[0:1]
             output_tensor = model(tokens, position_ids, attention_mask, labels)
@@ -436,7 +439,8 @@ class MegatronGPTModel(NLPModel):
         datatype = torch.int64
 
         data = micro_batch
-        data_b = tensor_parallel.broadcast_data(keys, data, datatype)
+        # data_b = tensor_parallel.broadcast_data(keys, data, datatype)
+        data_b = data
 
         # Unpack.
         tokens_ = data_b['text'].long()
@@ -835,9 +839,11 @@ class MegatronGPTModel(NLPModel):
                         eod_mask_loss=self.cfg.get('eod_mask_loss', False),
                     )
 
+                # get output tensor
                 # No labels during inference. Still need masks to not attend to the right
                 output_tensor = self(tokens, position_ids, attention_mask, prompt_tags=prompt_tags, labels=None)
                 output_tensor = tensor_parallel.gather_from_tensor_model_parallel_region(output_tensor)
+
                 log_probs, token_ids = torch.max(logsoftmaxlayer(output_tensor), dim=-1)
                 reached_eos = token_ids[0, -1].item() == self.tokenizer.eos_id
                 tokens = torch.cat([tokens, torch.unsqueeze(token_ids[:, -1], 1)], dim=1)
@@ -972,3 +978,11 @@ class MegatronGPTModel(NLPModel):
             f'Padded vocab_size: {after}, original vocab_size: {orig_vocab_size}, dummy tokens: {after - orig_vocab_size}.'
         )
         return after
+
+    def transfer_batch_to_device(self, batch: Any, device: torch.device, dataloader_idx: int) -> Any:
+        """ PTL hook: https://pytorch-lightning.readthedocs.io/en/latest/common/lightning_module.html#transfer-batch-to-device
+            When using pipeline parallelism, we need the global batch to remain on the CPU,
+            since the memory overhead will be too high when using a large number of microbatches.
+            Microbatches are transferred from CPU to GPU inside the pipeline. 
+        """
+        return batch
