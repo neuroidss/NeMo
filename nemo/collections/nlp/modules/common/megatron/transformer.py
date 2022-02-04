@@ -14,7 +14,9 @@
 # limitations under the License.
 
 """Transformer."""
+from json import encoder
 import math
+from sklearn import pipeline
 
 import torch
 import torch.nn.functional as F
@@ -33,7 +35,7 @@ from nemo.collections.nlp.modules.common.megatron.fused_bias_gelu import fused_b
 from nemo.collections.nlp.modules.common.megatron.fused_layer_norm import get_layer_norm
 from nemo.collections.nlp.modules.common.megatron.module import MegatronModule
 from nemo.collections.nlp.modules.common.megatron.utils import attention_mask_func, erf_gelu
-
+from nemo.utils import AppState
 
 """ We use the following notation throughout this file:
      h: hidden size
@@ -234,6 +236,7 @@ class ParallelAttention(MegatronModule):
             (query_layer, key_layer, value_layer) = tensor_parallel.split_tensor_along_last_dim(mixed_x_layer, 3)
         else:
             # Attention heads [sk, b, h] --> [sk, b, (np * 2 * hn)]
+            print(encoder_output.shape)
             mixed_kv_layer, _ = self.key_value(encoder_output)
 
             # [sk, b, (np * 2 * hn)] --> [sk, b, np, 2 * hn]
@@ -273,10 +276,10 @@ class ParallelAttention(MegatronModule):
         # [b, np, sq, sk]
         output_size = (query_layer.size(1), query_layer.size(2), query_layer.size(0), key_layer.size(0))
 
-        # print(self.attention_type)
-        # print(output_size)
-        # print(query_layer.shape)
-        # print(key_layer.shape)
+        print(self.attention_type)
+        print(output_size)
+        print(query_layer.shape)
+        print(key_layer.shape)
         # [sq, b, np, hn] -> [sq, b * np, hn]
         query_layer = query_layer.view(output_size[2], output_size[0] * output_size[1], -1)
         # [sk, b, np, hn] -> [sk, b * np, hn]
@@ -701,6 +704,7 @@ class ParallelTransformer(MegatronModule):
                 num_layers // parallel_state.get_virtual_pipeline_model_parallel_world_size()
             ) + (parallel_state.get_pipeline_model_parallel_rank() * self.num_layers)
         else:
+            app_state = AppState()
             # Each stage gets a contiguous set of layers.
             if self.model_type == ModelType.encoder_and_decoder and \
                     parallel_state.get_pipeline_model_parallel_world_size() > 1:
@@ -708,7 +712,7 @@ class ParallelTransformer(MegatronModule):
                 if layer_type == LayerType.encoder:
                     offset = pipeline_rank * self.num_layers
                 else:
-                    num_ranks_in_enc = parallel_state.pipeline_model_parallel_split_rank
+                    num_ranks_in_enc = app_state.pipeline_model_parallel_split_rank
                     offset = (pipeline_rank - num_ranks_in_enc) * self.num_layers
             else:
                 offset = parallel_state.get_pipeline_model_parallel_rank() * self.num_layers
@@ -723,12 +727,13 @@ class ParallelTransformer(MegatronModule):
         return self.layers[layer_number]
 
     def get_num_layers(self, num_layers):
+        app_state = AppState()
         """Compute the number of transformer layers resident on the current rank."""
         if parallel_state.get_pipeline_model_parallel_world_size() > 1:
             if self.model_type == ModelType.encoder_and_decoder:
-                print(parallel_state.pipeline_model_parallel_split_rank_)
-                assert parallel_state.pipeline_model_parallel_split_rank is not None
-                num_ranks_in_encoder = parallel_state.pipeline_model_parallel_split_rank
+                print(app_state.pipeline_model_parallel_split_rank)
+                assert app_state.pipeline_model_parallel_split_rank is not None
+                num_ranks_in_encoder = app_state.pipeline_model_parallel_split_rank
                 num_ranks_in_decoder = parallel_state.get_pipeline_model_parallel_world_size() - num_ranks_in_encoder
                 assert num_layers % num_ranks_in_encoder == 0, \
                         'num_layers must be divisible by number of ranks given to encoder'
