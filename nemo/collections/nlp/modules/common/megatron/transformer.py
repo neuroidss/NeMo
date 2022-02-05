@@ -240,7 +240,7 @@ class ParallelAttention(MegatronModule):
             (query_layer, key_layer, value_layer) = tensor_parallel.split_tensor_along_last_dim(mixed_x_layer, 3)
         else:
             # Attention heads [sk, b, h] --> [sk, b, (np * 2 * hn)]
-            print(encoder_output.shape)
+            encoder_output = encoder_output.transpose(0, 1)
             mixed_kv_layer, _ = self.key_value(encoder_output)
 
             # [sk, b, (np * 2 * hn)] --> [sk, b, np, 2 * hn]

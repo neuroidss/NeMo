@@ -200,6 +200,7 @@ class T5Model(MegatronModule):
 
         # Output.
         lm_logits = self.lm_head(decoder_output, self.language_model.embedding.word_embeddings.weight)
+        lm_logits = lm_logits.transpose(0, 1)
 
         if lm_labels is None:
             return lm_logits, encoder_output
